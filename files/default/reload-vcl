@@ -1,176 +1,175 @@
 #!/bin/sh
 
-# reload-varnish: Script to reload varnishd from VCL defined in
-# /etc/default/varnish.
-#
 # This is free software, distributed under the standard 2 clause BSD license,
 # see the copyright file in the Varnish documentation directory
-#
-# Stig Sandbeck Mathisen <ssm@debian.org>
 
-# Settings
-defaults=/etc/default/varnish
-secret=/etc/varnish/secret
+set -e
+set -u
 
-# Paths
-varnishadm=/usr/bin/varnishadm
-date=/bin/date
-tempfile=/bin/tempfile
+MAXIMUM=
+WORK_DIR=
+VCL_FILE=
+WARMUP=
+QUIET=
+SCRIPT="$0"
 
-# Messages
-# msg_no_varnishadm: varnishadm
-msg_no_varnishadm="Error: Cannot execute %s\n"
-msg_no_management="Management port disabled. \$DAEMON_OPTS must contain '-T hostname:port'\n"
-# msg_defaults_not_readable: defaults
-msg_defaults_not_readable="Error: %s is not readable\n"
-# msg_defaults_not_there: defaults
-msg_defaults_not_there="Error: %s does not exist\n"
-msg_no_vcl="Error: No VCL file used, nothing to reload\n"
-msg_usage="Usage: $0 [-h][-c][-q]\n\t-h\tdisplay help\n\t-q\tquiet\n\t-c\tcompile only, do not reload\n"
-# msg_compile_only: varnishadm, mgmt_interface, vcl_label
-msg_compile_only="To activate, run:\n\t%s -T %s \\\\\n\tvcl.use %s\n"
-# msg_compile_failed: vcl_label, vcl_file
-msg_compile_failed="Error: vcl.load %s %s failed"
-# msg_use_ok: vcl_label
-msg_use_ok="VCL reloaded, active label is %s\n"
-# msg_use_failed: vcl_label
-msg_use_failed="Error: vcl.use %s failed\n"
-# msg_secret_not_readable: secret
-msg_secret_not_readable="Error: Secret file %s is not readable\n"
-# msg_secret_not_there: secret
-msg_secret_not_there="Error: Secret file %s does not exist\n"
+usage() {
+	test $# -eq 1 &&
+	printf 'Error: %s.\n\n' "$1"
 
-# Generate a label, prefixed with the caller's username, from the
-# kernel random uuid generator, fallback to timestamp
-if [ -f /proc/sys/kernel/random/uuid ]
-then
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-    vcl_label="${LOGNAME}${LOGNAME:+:}${uuid}"
-else
-    vcl_label="$($date +${LOGNAME}${LOGNAME:+:}%s.%N)"
-fi
+	cat <<-EOF
+	Usage: $SCRIPT [-m <maximum>] [-n <workdir>] [-w <warmup>] [<file>]
+	       $SCRIPT -h
 
-# Load defaults file
-if [ -f "$defaults" ]
-then
-    if [ -r "$defaults" ]
-    then
-	. "$defaults"
-    else
-	printf >&2 "$msg_defaults_not_readable" $defaults
-	exit 1
-    fi
-else
-    printf >&2 "$msg_defaults_not_there" $defaults
-    exit 1
-fi
+	Reload and use a VCL on a running Varnish instance.
 
-# parse command line arguments
-while getopts hcq flag
-do
-    case $flag in
-	h)
-	    printf >&2 "$msg_usage"
-	    exit 0
-	    ;;
-	c)
-	    compile_only=1
-	    ;;
-	q)
-	    quiet=1
-	    ;;
-	*)
-	    printf >&2 "$msg_usage\n"
-	    exit 1
-	    ;;
-    esac
-done
+	Available options:
+	-h           : show this help and exit
+	-m <maximum> : maximum number of available reloads to leave behind
+	-n <workdir> : for a different working directory for varnishd
+	-w <warmup>  : the waiting period between load and use operations
+	-q           : run with no output
 
-# Parse $DAEMON_OPTS (options must be kept in sync with varnishd).
-# Extract the -f and the -T option, and (try to) ensure that the
-# management interface is on the form hostname:address.
-OPTIND=1
-while getopts j:a:b:CdFf:g:h:i:l:M:n:P:p:S:s:T:t:u:Vw: flag $DAEMON_OPTS
-do
-    case $flag in
-		f)
-			if [ -f "$OPTARG" ]; then
-				vcl_file="$OPTARG"
-			fi
-			;;
-		T)
-			if [ -n "$OPTARG" -a "$OPTARG" != "${OPTARG%%:*}" ]
-			then
-				mgmt_interface="$OPTARG"
-			fi
-			;;
-		S)
-			secret="$OPTARG"
-			;;
-    esac
-done
+	When <file> is empty or missing, the active VCL's file is used but
+	will fail if the active VCL wasn't loaded from a file.
 
+	Upon success, the name of the loaded VCL is constructed from the
+	current date and time, for example:
 
-# Sanity checks
-if [ ! -x "$varnishadm" ]
-then
-    printf >&2 "$msg_no_varnishadm" $varnishadm
-    exit 1
-fi
+	    $(vcl_reload_name)
 
-if [ -z "$mgmt_interface" ]
-then
-    printf >&2 "$msg_no_management"
-    exit 1
-fi
+	Afterwards available VCLs created by this script are discarded until
+	<maximum> are left, unless it was empty or undefined.
+	EOF
+	exit $#
+}
 
-if [ -z "$vcl_file" ]
-then
-    printf >&2 "$msg_no_vcl"
-    exit 1
-fi
-
-# Check secret file
-if [ -f "$secret" ]
+varnishadm() {
+	if ! OUTPUT=$(command varnishadm -n "$WORK_DIR" -- "$@" 2>&1)
 	then
-	if [ ! -r "$secret" ]
-	then
-		printf >&2 "$msg_secret_not_readable" $secret
+		echo "Command: varnishadm -n '$WORK_DIR' -- $*"
+		echo
+		echo "$OUTPUT"
+		echo
 		exit 1
-	fi
-else
-	printf >&2 "$msg_secret_not_there" $secret
-	exit 1
-fi
+	fi >&2
+	echo "$OUTPUT"
+}
 
-logfile=$($tempfile -n /tmp/$vcl_label)
-
-# Compile and maybe reload
-if $varnishadm -T $mgmt_interface -S ${secret} vcl.load $vcl_label $vcl_file
-then
-    if [ -n "$compile_only" ]
-    then
-	printf "$msg_compile_only" $varnishadm $mgmt_interface $vcl_label
-    else
-	if $varnishadm -T $mgmt_interface -S ${secret} vcl.use $vcl_label
+fail() {
+	if [ -z "$QUIET" ]
 	then
-	    printf "$msg_use_ok" $vcl_label
-	else
-	    printf "$msg_use_failed" $vcl_label
-	    exitstatus=1
+		echo "Error: $*" >&2
 	fi
-    fi
-else
-    printf "$msg_compile_failed" $vcl_label $vcl_file
-    exitstatus=1
-fi > $logfile
+	exit 1
+}
 
-# Blather
-if [ -z "${quiet}" -o -n "$exitstatus" ]
+vcl_file() {
+	VCL_SHOW="$(varnishadm vcl.show -v "$1")" ||
+	fail "failed to get the VCL file name"
+
+	echo "$VCL_SHOW" |
+	awk '$1 == "//" && $2 == "VCL.SHOW" {print $NF; exit}'
+}
+
+vcl_active_name() {
+	VCL_LIST="$(varnishadm vcl.list)" ||
+	fail "failed to get the active VCL name"
+
+	echo "$VCL_LIST" |
+	awk '$1 == "active" {print $NF}'
+}
+
+vcl_active_file() {
+	set -e
+	VCL_NAME=$(vcl_active_name)
+	vcl_file "$VCL_NAME"
+}
+
+vcl_reload_match() {
+	awk '$1 == "available" && $NF ~ /^reload_[0-9]{8}_[0-9]{6}$/'" {$1}"
+}
+
+vcl_reload_count() {
+	VCL_LIST="$(varnishadm vcl.list)" ||
+	fail "failed to count available reload VCLs"
+
+	echo "$VCL_LIST" |
+	vcl_reload_match print |
+	sed '=;d' |
+	tail -1
+}
+
+vcl_reload_oldest() {
+	VCL_LIST="$(varnishadm vcl.list)" ||
+	fail "failed to get the oldest reload VCLs"
+
+	echo "$VCL_LIST" |
+	vcl_reload_match 'print $NF; exit'
+}
+
+vcl_reload_name() {
+	printf "reload_%s" "$(date +%Y%m%d_%H%M%S)"
+}
+
+while getopts hm:n:w:q OPT
+do
+	case $OPT in
+	h) usage ;;
+	m) MAXIMUM=$OPTARG ;;
+	n) WORK_DIR=$OPTARG ;;
+	w) WARMUP=$OPTARG ;;
+	q) QUIET="TRUE" ;;
+	*) usage "wrong usage" >&2 ;;
+	esac
+done
+
+shift $((OPTIND - 1))
+
+test $# -gt 1 && usage "too many arguments" >&2
+test $# -eq 1 && VCL_FILE="$1"
+
+if [ -z "$VCL_FILE" ]
 then
-    grep -v '^$' >&2 $logfile
+	VCL_FILE=$(vcl_active_file)
+
+	case $VCL_FILE in
+	/*) ;;
+	*) fail "active VCL file not found (got $VCL_FILE)" ;;
+	esac
 fi
 
-# Cleanup
-rm -f $logfile
-exit $exitstatus
+RELOAD_NAME=$(vcl_reload_name)
+
+OUTPUT=$(varnishadm vcl.load "$RELOAD_NAME" "$VCL_FILE")
+if [ -z "$QUIET" ]
+then
+	echo "$OUTPUT"
+fi
+
+test -n "$WARMUP" && sleep "$WARMUP"
+
+OUTPUT=$(varnishadm vcl.use  "$RELOAD_NAME")
+if [ -z "$QUIET" ]
+then
+    echo "$OUTPUT"
+fi
+
+safe_test() {
+	test -z "$1" && return 1
+	test "$@"
+}
+
+safe_test "$MAXIMUM" -ge 0 || exit 0
+
+while true
+do
+	COUNT=$(vcl_reload_count)
+	safe_test "$COUNT" -gt "$MAXIMUM" || exit 0
+	OLDEST=$(vcl_reload_oldest)
+	varnishadm vcl.discard "$OLDEST" >/dev/null
+	if [ -z "$QUIET" ]
+	then
+		echo "VCL '$OLDEST' was discarded"
+	fi
+done
