@@ -12,14 +12,14 @@ Requirements
 
 ### Platforms
 
-Tested on the platforms below with distro installs and upstream Varnish packaging version 4.1 unless otherwise noted.
+Tested on the platforms below with distro installs and upstream Varnish packaging versions 4.1 and 5.1 unless otherwise noted.
 
 
 * Ubuntu 14.04
 * Ubuntu 16.04
-  * Tested with Ubuntu's 16.04 distribution (version 4.1).
+  * Tested with upstream 5.1 and the ubuntu 16.04 distribution (4.1).
 * CentOS 6.8
-  * Tested with upstream 4.1 (distro version is 2.0 which is not supported by this cookbook) 
+  * Tested with upstream 4.1 and 5.1 (distro version is 2.0 which is not supported by this cookbook) 
 * CentOS 7.3
 
 Other versions may work but require pinning to the correct version which isn't included in this cookbook currently.
